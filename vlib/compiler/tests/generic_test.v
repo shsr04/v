@@ -38,7 +38,7 @@ fn mul_int(x int, y int) int {
     return x*y
 }
 
-fn assert_eq<T>(a, b T) {
+pub fn assert_eq<T>(a, b T) {
     r := a == b
     println('$a == $b: ${r.str()}')
     assert r

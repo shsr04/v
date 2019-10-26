@@ -297,5 +297,14 @@ fn (t Token) str() string {
 		return t.lit // string, number etc
 	}	
 	return t.tok.str()
-}	
+}
+
+fn (t []Token) str() string {
+	mut r := ' '
+	for e in t {
+		s := if e.lit == '' { e.tok.str() } else { e.lit }
+		r = r + s + ' '
+	}
+	return r
+}
 

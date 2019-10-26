@@ -41,7 +41,7 @@ mut:
 	type_pars 	  []string
 	type_inst 	  []TypeInst
 	dispatch_of	  TypeInst	// current type inst of this generic instance
-	body_idx	  int		// idx of the first body statement
+	body_tokens	  []Token		// tokens inside the fn body
 	fn_name_token_idx int // used by error reporting
 }
 
@@ -391,7 +391,21 @@ fn (p mut Parser) fn_decl() {
 		// Generic functions are inserted as needed from the call site
 		if f.is_generic {
 			if p.first_pass() {
-				f.body_idx = p.cur_tok_index()+1
+				mut b := 1
+				mut tokens := []Token
+				for b > 0 {
+					if p.tok == .lcbr {
+						b += 1
+					} else if p.tok == .rcbr {
+						b -= 1
+					}
+					tokens << p.tokens[p.token_idx-1]
+					if b > 0 {
+						p.next()
+					}
+				}
+				p.check(.rcbr)		// closes the fn body
+				f.body_tokens = tokens
 				if f.is_method {
 					rcv := p.table.find_type(receiver_typ)
 					if p.first_pass() && rcv.name == '' {
@@ -407,12 +421,13 @@ fn (p mut Parser) fn_decl() {
 				} else {
 					p.table.register_fn(f)
 				}
+			} else {
+				p.skip_fn_body()
 			}
 			if f.is_method { p.mark_var_changed(f.args[0]) }
 			p.check_unused_variables()
 			p.set_current_fn( EmptyFn )
 			p.returns = false
-			p.skip_fn_body()
 			return
 		} else {
 			p.gen_fn_decl(f, typ, str_args)
@@ -1080,6 +1095,7 @@ fn (p mut Parser) fn_call_args(f mut Fn) {
 	p.check(.rpar)
 	if f.is_generic {
 		type_map := p.extract_type_inst(f, saved_args)
+		println('dispatching $f.name with $type_map.inst')
 		p.dispatch_generic_fn_instance(mut f, type_map)
 	}
 	if f.is_variadic {
@@ -1131,7 +1147,7 @@ fn (p mut Parser) extract_type_inst(f &Fn, args_ []string) TypeInst {
 	}
 	for tp in f.type_pars {
 		if r.inst[tp] == '' {
-			p.error_with_token_index('unused type parameter `$tp`', f.body_idx-2)
+			p.error('unused type parameter `$tp` (generic function `$f.name`)')
 		}
 	}
 	return r
@@ -1310,8 +1326,10 @@ fn (p mut Parser) dispatch_generic_fn_instance(f mut Fn, ti TypeInst) {
 	p.table.register_fn(f)
 	// Remember current scanner position, go back here for each type instance
 	// TODO remove this once tokens are cached in `new_parser()`
+	saved_tokens := p.tokens
 	saved_tok_idx := p.cur_tok_index()
 	saved_fn := p.cur_fn
+	saved_mod := p.mod
 	saved_var_idx := p.var_idx
 	saved_local_vars := p.local_vars
 	p.clear_vars()
@@ -1351,25 +1369,30 @@ fn (p mut Parser) dispatch_generic_fn_instance(f mut Fn, ti TypeInst) {
 	} else {
 		p.table.register_fn(f)
 	}
-	// println("generating gen inst $f.name(${f.str_args(p.table)}) $f.typ : $ti.inst")
+	println('$p.table.modules')
+	println("generating gen inst $f.name(${f.str_args(p.table)}) $f.typ : $ti.inst")
 
 	p.cgen.is_tmp = false
 	p.returns = false
 	p.cgen.tmp_line = ''
 	p.cgen.cur_line = ''
 	p.cgen.lines = []string
+	p.mod = f.mod
 	p.cur_fn = *f
 	for arg in f.args {
 		p.register_var(arg)
 	}
-	p.token_idx = f.body_idx-1
-	p.next()	// re-initializes the parser properly
+	p.tokens = f.body_tokens
+	p.token_idx = 0
+	p.next()
+	println(p.tokens)
 	str_args := f.str_args(p.table)
 
 	p.in_dispatch = true
 	p.genln('${p.get_linkage_prefix()}$f.typ $f.name($str_args) {')
 	// p.genln('/* generic fn instance $f.name : $ti.inst */')
-	p.statements()
+	p.statements_no_rcbr()
+	p.genln('}')
 	p.in_dispatch = false
 
 	if f.typ == '_ANYTYPE_' {
@@ -1381,10 +1404,13 @@ fn (p mut Parser) dispatch_generic_fn_instance(f mut Fn, ti TypeInst) {
 	for l in p.cgen.lines {
 		p.cgen.fns << l
 	}
+	println(p.cgen.lines)
 
+	p.tokens = saved_tokens
 	p.token_idx = saved_tok_idx-1
 	p.next()
 	p.check(.rpar)		// end of the arg list which caused this dispatch
+	p.mod = saved_mod
 	p.cur_fn = saved_fn
 	p.var_idx = saved_var_idx
 	p.local_vars = saved_local_vars
